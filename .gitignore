@@ -1,0 +1,15 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+captures/
+
+# IDE
+.idea/
+*.iml
+
+# build output
+*.apk
+*.aab
+*.jks
