@@ -819,6 +819,29 @@ object Inject {
     + '.modal.show .modal-content{'
     +   'height:100%!important;border-radius:0!important;'
     + '}'
+    // Mobile settings panes must fit the scrollport, not the outer width
+    // plus padding / a reserved scrollbar. Keep the site's card spacing.
+    + 'body.mobile .modal.options-dialog .modal-body,'
+    + 'body.mobile .modal.options-dialog .tn-master-pane,'
+    + 'body.mobile .modal.options-dialog .tn-detail-pane,'
+    + 'body.mobile .modal.options-dialog .note-detail,'
+    + 'body.mobile .modal.options-dialog .note-detail-content-widget,'
+    + 'body.mobile .modal.options-dialog .note-detail-content-widget-content.options{'
+    +   'box-sizing:border-box!important;min-width:0!important;max-width:100%!important;'
+    + '}'
+    + 'body.mobile .modal.options-dialog .tn-master-pane,'
+    + 'body.mobile .modal.options-dialog .tn-detail-pane,'
+    + 'body.mobile .modal.options-dialog .note-detail{'
+    +   'width:auto!important;overflow-x:hidden!important;'
+    + '}'
+    + 'body.mobile .modal.options-dialog .options-mobile-nav,'
+    + 'body.mobile .modal.options-dialog .note-detail-content-widget-content.options{'
+    +   'width:100%!important;box-sizing:border-box!important;'
+    + '}'
+    + 'body.mobile .modal.options-dialog .options-mobile-nav > *, '
+    + 'body.mobile .modal.options-dialog .options-section{'
+    +   'box-sizing:border-box!important;min-width:0!important;max-width:100%!important;'
+    + '}'
     + '.global-menu-cover{'
     +   'top:0!important;bottom:0!important;height:100%!important;'
     + '}'
@@ -938,8 +961,9 @@ object Inject {
     st.background = bg;
     st.borderRadius = '999px 0 0 999px';
     st.right = '0';
-    // leave room for the pill's left cap so it does not hug the first icon
-    st.left = Math.round(pnR.left - trR.left - 8) + 'px';
+    // Keep the cap inside the panel slot instead of protruding into
+    // preceding status/action icons. Do not change any icon geometry.
+    st.left = Math.round(pnR.left - trR.left + 2) + 'px';
     st.top = Math.round(bkR.top - trR.top) + 'px';
     st.height = Math.round(bkR.height) + 'px';
     st.width = 'auto';
