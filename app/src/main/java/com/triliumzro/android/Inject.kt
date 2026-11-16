@@ -658,6 +658,63 @@ object Inject {
     }).observe(document.body, { childList: true });
   } catch (e) {}
 
+  // ---- options dialog: keep card corners off the scrollbar lane ------------
+  // The dialog's scroll boxes reserve a scrollbar gutter on BOTH edges, so in
+  // the WebView the painted box ends one bar-width short of the layout box and
+  // the last pixels of a card's right edge (its rounded corner) are cut away.
+  // Chrome uses overlay scrollbars, takes no space, and never shows it.
+  // Trilium sets the gutter with its own !important rule, which a stylesheet of
+  // equal weight cannot outrank; inline declarations can. Options has several
+  // sub-pages inside the same dialog, each with its own scroller, so every
+  // descendant is checked, not just whichever pane rendered first.
+  function zrqPin(el) {
+    try {
+      var g = '';
+      try { g = getComputedStyle(el).scrollbarGutter || ''; } catch (e) {}
+      if (g && g.indexOf('stable') === 0) {
+        el.style.setProperty('scrollbar-gutter', 'auto', 'important');
+        return true;
+      }
+      if (el.scrollHeight > el.clientHeight + 2
+          || el.scrollWidth > el.clientWidth + 2) {
+        el.style.setProperty('scrollbar-gutter', 'auto', 'important');
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  function zrqPinDialog() {
+    try {
+      var dlg = document.querySelector('.options-dialog');
+      if (!dlg) return;
+      // the page subtracts a bar width from both insets, which only held while
+      // a start-edge gutter was reserved; keep the start inset whole
+      if (dlg.style.getPropertyValue('--options-pane-inset-left') !==
+          'var(--options-inset-left)') {
+        dlg.style.setProperty('--options-pane-inset-left',
+          'var(--options-inset-left)', 'important');
+      }
+      var all = dlg.getElementsByTagName('*');
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].getAttribute('data-zrq-gc') === '1') continue;
+        if (zrqPin(all[i])) all[i].setAttribute('data-zrq-gc', '1');
+      }
+    } catch (e) {}
+  }
+  var zrqQueued = false;
+  function zrqSchedule() {
+    if (zrqQueued) return;
+    zrqQueued = true;
+    try {
+      requestAnimationFrame(function () { zrqQueued = false; zrqPinDialog(); });
+    } catch (e) { zrqQueued = false; zrqPinDialog(); }
+  }
+  try {
+    new MutationObserver(zrqSchedule)
+      .observe(document.documentElement || document, { childList: true, subtree: true });
+  } catch (e) {}
+  zrqSchedule();
+
 })();
 """
 
@@ -728,6 +785,9 @@ object Inject {
     // ---- bottom bar: rightmost menu key ----
     + '#mobile-bottom-bar .global-menu-button{'
     +   'background:var(--zrq-blue)!important;color:#fff!important;'
+    // square corners: the rounded key reads as a floating button, while the
+    // bar it sits in is a rectangle
+    +   'border-radius:0!important;'
     + '}'
     + '#mobile-bottom-bar .global-menu.open .global-menu-button,'
     + '#mobile-bottom-bar .global-menu-button[aria-expanded="true"],'
@@ -822,16 +882,25 @@ object Inject {
     + '.global-menu-cover{'
     +   'top:0!important;bottom:0!important;height:100%!important;'
     + '}'
+    // Fullscreen exit is a small green pill sitting ABOVE the bottom-bar menu
+    // key: the top-right cluster is reserved for the note panel + menu and any
+    // state badge that shows up there (protected / syncing), so a floating
+    // icon there would eventually land on top of one. Above the menu key it
+    // stays on the same side as the control it replaces and touches nothing.
     + '.zrq-fs-exit{'
-    +   'position:fixed!important;width:34px!important;height:34px!important;'
+    +   'position:fixed!important;left:auto!important;top:auto!important;'
+    +   'right:12px!important;bottom:70px!important;'
+    +   'width:auto!important;height:auto!important;'
+    +   'padding:7px 14px!important;border-radius:999px!important;'
+    +   'background:var(--zrq-green,#34C759)!important;color:#fff!important;'
+    +   'font:600 13px/1 -apple-system,system-ui,sans-serif!important;'
+    +   'letter-spacing:.02em!important;white-space:nowrap!important;'
     +   'z-index:2147482500!important;display:flex!important;'
     +   'align-items:center!important;justify-content:center!important;'
-    +   'border-radius:50%!important;color:var(--main-text-color,#e6e6e6)!important;'
-    +   'font-size:19px!important;cursor:pointer!important;'
-    +   GLASS_BG + GLASS_BLUR
-    +   'border:0!important;'
+    +   'box-shadow:0 4px 14px rgba(0,0,0,.28)!important;'
+    +   'cursor:pointer!important;border:0!important;'
     + '}'
-    + '.zrq-fs-exit:active{transform:scale(.92);}'
+    + '.zrq-fs-exit:active{transform:scale(.94);}'
     + '.zrq-zen-exit{'
     +   'position:fixed!important;right:12px!important;bottom:16px!important;'
     +   'z-index:2147482000!important;display:flex!important;'
@@ -919,10 +988,14 @@ object Inject {
     var pnR = panel.getBoundingClientRect();
     if (bkR.height < 10 || pnR.width < 4) return;
 
-    var bg = getComputedStyle(backBtn).backgroundColor;
-    // A transparent back button is intentional in some server themes.
-    // Do not invent a grey pill when its matching reference has no fill.
-    if (!bg) bg = 'transparent';
+    // None of the three title-bar icons keeps a chip fill: the bar's own
+    // frosted surface is the background, so the glyphs sit straight on it and
+    // nothing merges with a state badge that appears next to them.
+    backBtn.style.setProperty('background', 'transparent', 'important');
+    backBtn.style.setProperty('box-shadow', 'none', 'important');
+    if (backWrap && backWrap !== backBtn) {
+      backWrap.style.setProperty('background', 'transparent', 'important');
+    }
 
     var layer = tr.querySelector('.zrq-cluster');
     if (!layer) {
@@ -935,11 +1008,24 @@ object Inject {
     st.position = 'absolute';
     st.pointerEvents = 'none';
     st.zIndex = '-1';
-    st.background = bg;
+    st.background = 'transparent';
     st.borderRadius = '999px 0 0 999px';
     st.right = '0';
-    // leave room for the pill's left cap so it does not hug the first icon
-    st.left = Math.round(pnR.left - trR.left - 8) + 'px';
+    // Leave room for the pill's left cap, but never let the cap swallow the
+    // state badge that appears to its left: when one shows up, stop 6px short
+    // of it so the two blocks stay visibly separate instead of merging.
+    var leftPx = pnR.left - trR.left - 8;
+    var sib = panel.previousElementSibling;
+    while (sib) {
+      var sr = sib.getBoundingClientRect();
+      if (sr.width > 4 && sr.height > 4) {
+        var want = sr.right - trR.left + 6;
+        if (want > leftPx) leftPx = want;
+        break;
+      }
+      sib = sib.previousElementSibling;
+    }
+    st.left = Math.round(leftPx) + 'px';
     st.top = Math.round(bkR.top - trR.top) + 'px';
     st.height = Math.round(bkR.height) + 'px';
     st.width = 'auto';
@@ -1092,7 +1178,7 @@ object Inject {
     }
   }
 
-  // ---- fullscreen: exit icon next to the title-bar buttons -----------------
+  // ---- fullscreen: exit icon in the bottom-left corner ----------------------
   function syncFsExit() {
     var on = !!document.fullscreenElement;
     var btn = document.getElementById('zrq-fs-exit');
@@ -1100,9 +1186,7 @@ object Inject {
       btn = document.createElement('div');
       btn.id = 'zrq-fs-exit';
       btn.className = 'zrq-fs-exit';
-      var i = document.createElement('i');
-      i.className = 'bx bx-exit-fullscreen';
-      btn.appendChild(i);
+      btn.textContent = '退出全屏';
       btn.addEventListener('click', function (ev) {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1115,31 +1199,18 @@ object Inject {
       try { btn.remove(); } catch (e) {}
     }
     if (!on || !btn) return;
-    // sit just left of the right-hand title-bar buttons
-    var anchor = null;
-    var rows = document.querySelectorAll('#detail-container .title-row');
-    for (var i = 0; i < rows.length; i++) {
-      var rr = rows[i].getBoundingClientRect();
-      if (rr.width > 0 && rr.height > 0) { anchor = rows[i]; break; }
+    // Park the pill directly above the bottom bar (i.e. above the menu key).
+    // Right side only, so the top-right icon cluster is never touched.
+    // fall back to the bar's usual height: in zen / fullscreen the bar can be
+    // hidden, and the pill must still sit above where the menu key would be
+    // rather than dropping onto the zen exit pill at the bottom edge
+    var barH = 58;
+    var bar = document.getElementById('mobile-bottom-bar');
+    if (bar) {
+      var br = bar.getBoundingClientRect();
+      if (br.height > 4) barH = Math.max(0, window.innerHeight - br.top);
     }
-    var minLeft = null, top = 12, height = 34;
-    if (anchor) {
-      var icons = anchor.querySelectorAll('.icon-action');
-      for (var k = 0; k < icons.length; k++) {
-        var ir = icons[k].getBoundingClientRect();
-        if (ir.width > 4 && ir.height > 4 && ir.left > window.innerWidth * 0.55) {
-          if (minLeft === null || ir.left < minLeft) minLeft = ir.left;
-          top = ir.top + (ir.height - 34) / 2;
-          height = ir.height;
-        }
-      }
-      var ar = anchor.getBoundingClientRect();
-      if (minLeft === null) top = ar.top + (ar.height - 34) / 2;
-    }
-    btn.style.top = Math.round(top) + 'px';
-    btn.style.right = minLeft === null
-      ? '96px'
-      : Math.round(window.innerWidth - minLeft + 8) + 'px';
+    btn.style.setProperty('bottom', Math.round(barH + 12) + 'px', 'important');
   }
 
   // ---- zen mode exit pill ------------------------------------------------
