@@ -666,8 +666,8 @@ object Inject {
 (function () {
   if (window.__zrqGlass) { window.__zrqGlass.refresh(); return; }
 
-  var GLASS_BG = 'background:rgba(128,128,128,0.11)!important;'
-    + 'background:color-mix(in srgb, var(--main-background-color) 69%, transparent)!important;';
+  var GLASS_BG = 'background:rgba(128,128,128,0.06)!important;'
+    + 'background:color-mix(in srgb, var(--main-background-color) 64%, transparent)!important;';
 
   var GLASS_BLUR = '-webkit-backdrop-filter:blur(20px) saturate(180%)!important;'
     + 'backdrop-filter:blur(20px) saturate(180%)!important;';
@@ -920,7 +920,9 @@ object Inject {
     if (bkR.height < 10 || pnR.width < 4) return;
 
     var bg = getComputedStyle(backBtn).backgroundColor;
-    if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') bg = 'rgba(127,127,127,0.18)';
+    // A transparent back button is intentional in some server themes.
+    // Do not invent a grey pill when its matching reference has no fill.
+    if (!bg) bg = 'transparent';
 
     var layer = tr.querySelector('.zrq-cluster');
     if (!layer) {
@@ -1261,7 +1263,8 @@ object Inject {
       var foreign = false;
       for (var a = 0; a < added.length; a++) if (!isOurs(added[a])) foreign = true;
       for (var b = 0; b < removed.length; b++) if (!isOurs(removed[b])) foreign = true;
-      if (foreign) return false;
+      if (foreign || r.type === 'characterData' ||
+          (r.type === 'attributes' && !isOurs(r.target))) return false;
     }
     return true;
   }
@@ -1272,16 +1275,32 @@ object Inject {
       new MutationObserver(function (records) {
         if (onlyOwnMutations(records)) return;
         refresh();
-      }).observe(document.documentElement, { childList: true, subtree: true });
+      }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
     } catch (e) {}
+    // Themes may replace stylesheets or mutate body classes / CSS variables.
+    // Wait for external CSS to load too; insertion alone can sample old colours.
+    document.addEventListener('load', function (ev) {
+      if (ev.target && ev.target.tagName === 'LINK') refresh(true);
+    }, true);
+    document.addEventListener('transitionend', function (ev) {
+      if (ev.target && ev.target.closest && ev.target.closest('.toggle-sidebar-button')) refresh(true);
+    }, true);
     document.addEventListener('visibilitychange', function () { refresh(true); });
     document.addEventListener('zenModeChanged', function () { refresh(true); });
     document.addEventListener('scroll', function () {
       try { syncScrollbar(); } catch (e) {}
     }, true);
     try {
-      new MutationObserver(function () { refresh(true); }).observe(document.documentElement, {
-        attributes: true, attributeFilter: ['class']
+      new MutationObserver(function (records) {
+        for (var i = 0; i < records.length; i++) {
+          var t = records[i].target;
+          if (t === document.documentElement || t === document.body ||
+              (t.closest && t.closest('head, .toggle-sidebar-button'))) {
+            refresh(true); break;
+          }
+        }
+      }).observe(document.documentElement, {
+        attributes: true, subtree: true, attributeFilter: ['class', 'style', 'href', 'disabled', 'media', 'data-theme', 'data-bs-theme']
       });
     } catch (e) {}
     window.addEventListener('hashchange', function () { extraDirty = true; refresh(true); });
