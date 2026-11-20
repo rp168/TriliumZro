@@ -57,9 +57,13 @@ class MainActivity : Activity() {
     private var lastTap = 0L
     private var volTaps = 0
     private var lastVol = 0L
+    private var volDownTaps = 0
+    private var lastVolDown = 0L
     private var nativeFullscreen = false
     private var offline = false
     private var splash: View? = null
+    /** 正在用原生遮罩盖住「切回内置登录页」这个过程。 */
+    private var coverSwitch = false
     // password typed on the offline page: kept in memory until the server's
     // login form has actually taken it (or rejected it), never longer
     private var pendingPass: String? = null
@@ -71,10 +75,31 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // One-time repair: an accidental 3x volume-up used to persist "styles off",
+        // which is how the frosted-glass layer disappeared. Must run after
+        // attach(), so it belongs here and not in a constructor block.
+        try {
+            val sp = getSharedPreferences("zrq", 0)
+            if (!sp.getBoolean("inject-repair-95", false)) {
+                sp.edit().putBoolean("inject", true)
+                    .putBoolean("inject-repair-95", true).apply()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("ZRQ", "inject repair failed", e)
+        }
+
         root = FrameLayout(this)
         root.setBackgroundColor(Color.parseColor("#1F1F1F"))
 
         web = WebView(this)
+        // Different layer than CSS: the WebView's own scrollbar is drawn by the
+        // native view on top of the page. Turning it off here means nothing is
+        // painted over the page's right edge at all, and the page keeps its own
+        // (thin) indicator. No page CSS is touched.
+        web.scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+        web.isVerticalScrollBarEnabled = false
+        web.isHorizontalScrollBarEnabled = false
+        web.isScrollbarFadingEnabled = true
         root.addView(web, FrameLayout.LayoutParams(-1, -1))
 
         val density = resources.displayMetrics.density
@@ -85,7 +110,6 @@ class MainActivity : Activity() {
         lp.topMargin = 0
         root.addView(bar, lp)
         bar.isClickable = true
-        bar.setOnClickListener { handleSecretTap() }
 
         // Covers the WebView while a credential is being handed to the server,
         // so the server's own login page never flashes on the way in.
@@ -216,6 +240,22 @@ class MainActivity : Activity() {
                 }
             }
 
+            /**
+             * 服务器 SPA 自己跳到了它的 /login 页，而我们又不在「正在把密码交给服务器」
+             * 的过程中（比如 cookie 过期、改了地址、点了退出）：切回我们自己的登录页，
+             * 不让用户看到服务器自带的登录界面。
+             */
+            @android.webkit.JavascriptInterface
+            fun needLogin() {
+                runOnUiThread {
+                    if (offline) return@runOnUiThread
+                    if (pendingPass != null || pendingSubmitted) return@runOnUiThread
+                    // 先盖上原生遮罩再换页：loadDataWithBaseURL 渲染完之前，
+                    // WebView 里还是服务器页面，不盖就会闪一下。
+                    showLogin(cover = true)
+                }
+            }
+
             /** Logged in: drop the in-memory password. */
             @android.webkit.JavascriptInterface
             fun loggedIn() {
@@ -297,15 +337,29 @@ class MainActivity : Activity() {
                 bar.visibility = View.VISIBLE
                 view.evaluateJavascript(versionPrelude(), null)
                 view.evaluateJavascript(Inject.SHIM, null)
+                view.evaluateJavascript(LOGIN_GUARD, null)
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 bar.visibility = View.GONE
-                if (url.startsWith("about:")) return   // our own offline page
+                if (url.startsWith("about:")) {
+                    if (coverSwitch) { coverSwitch = false; hideSplash() }
+                    return   // our own offline page
+                }
                 if (pendingPass == null) hideSplash()
                 view.evaluateJavascript(versionPrelude(), null)
                 view.evaluateJavascript(Inject.SHIM, null)
+                view.evaluateJavascript(LOGIN_GUARD, null)
                 if (stylesOn()) view.evaluateJavascript(Inject.STYLES, null)
+                val bn = getSharedPreferences("zrq", 0).getString("banner", null)
+                if (bn != null) {
+                    getSharedPreferences("zrq", 0).edit().remove("banner").apply()
+                    val text = bn + "（本页样式" + (if (stylesOn()) "已注入" else "未注入") + "）"
+                    view.evaluateJavascript(
+                        "setTimeout(function(){window.__zrqBanner&&window.__zrqBanner(" +
+                            org.json.JSONObject.quote(text) + ");},500)", null
+                    )
+                }
 
                 // The SPA builds its login form after the page "finishes",
                 // so a single fill is too early. Submitted and we are off the
@@ -476,11 +530,20 @@ class MainActivity : Activity() {
 
     /** Sign-in / connection page. The layout never changes; a failure only
      *  adds the popup panel on top of it. */
-    private fun showLogin(msg: Boolean = false) {
-        hideSplash()
+    private fun showLogin(msg: Boolean = false, cover: Boolean = false) {
+        if (cover) {
+            coverSwitch = true
+            showSplash()
+        } else {
+            hideSplash()
+        }
         offline = true
         bar.visibility = View.GONE
         web.loadDataWithBaseURL(null, offlinePage(msg), "text/html", "utf-8", null)
+        if (cover) {
+            // 本地页渲染很快；拿不到 onPageFinished 时也兜个底
+            web.postDelayed({ if (coverSwitch) { coverSwitch = false; hideSplash() } }, 500)
+        }
     }
 
     private fun showError() = showLogin(true)
@@ -569,6 +632,75 @@ function re(){
 </script>
 </body></html>"""
     }
+
+    /**
+     * 常驻页面守卫：一旦 SPA 路由到服务器自己的 /login（且没有密码正在提交），
+     * 通过桥通知原生层切回我们的登录页。SPA 切换路由不触发 onPageFinished，
+     * 所以必须在页面内用定时器盯着。
+     */
+    /**
+     * 常驻页面守卫。两件事：
+     *  1) 尽早塞一条 CSS，把服务器自带登录页遮住（body.setup 只有 login/setup/
+     *     set_password 三个 chunk 会加，而 .login-container 仅登录页有），
+     *     所以官方登录界面从渲染的第一帧就不会露出来；
+     *  2) 一旦确认是登录页，通过桥通知原生层切回我们自己的登录页。
+     * 判据用 DOM 而不是 URL：Trilium 的 /login 会 302 到 "/?login"，SPA 停在 "/"。
+     */
+    private val LOGIN_GUARD = """
+        (function(){
+          if (window.__zrqGuardOn) return 'busy';
+          window.__zrqGuardOn = 1;
+          var HIDE_ID = 'zrq-login-hide';
+          function ensureHide(){
+            try{
+              if (window.__zrqHideOff) return;
+              if (document.getElementById(HIDE_ID)) return;
+              var st = document.createElement('style');
+              st.id = HIDE_ID;
+              st.textContent = 'body.setup .login-container{visibility:hidden !important}';
+              (document.head || document.documentElement).appendChild(st);
+            }catch(e){}
+          }
+          function onLoginScreen(){
+            try{
+              var pr = location.protocol || '';
+              if (pr !== 'http:' && pr !== 'https:') return false;
+              if (document.querySelector('.login-container')) return true;
+              var p = (location.pathname || '');
+              while (p.length > 1 && p.charAt(p.length - 1) === '/') p = p.slice(0, -1);
+              return p.slice(-6) === '/login';
+            }catch(e){}
+            return false;
+          }
+          function chk(){
+            try{
+              ensureHide();
+              if (!onLoginScreen()){ window.__zrqGuardFired = 0; return; }
+              if (window.__zrqFill) return;
+              if (window.__zrqGuardFired) return;
+              if (!document.querySelector('input[type=password]')) return;
+              window.__zrqGuardFired = 1;
+              ZRQ.needLogin();
+            }catch(e){}
+          }
+          ensureHide();
+          setTimeout(ensureHide, 150);
+          setTimeout(chk, 400);
+          setInterval(chk, 500);
+          // 兜底：5 秒后还停在服务器登录页（说明切换没成功），把遮罩永久撤掉，
+          // 免得用户面对一片空白、连手动登录都做不到。
+          setTimeout(function(){
+            try{
+              if (document.querySelector('.login-container')){
+                window.__zrqHideOff = 1;
+                var s = document.getElementById(HIDE_ID);
+                if (s) s.remove();
+              }
+            }catch(e){}
+          }, 5000);
+          return 'ok';
+        })()
+    """.trimIndent()
 
     /** Fill Trilium's login form (password only) and submit it. */
     /**
@@ -667,44 +799,6 @@ function re(){
 
     private fun handleUrl(uri: Uri): Boolean {
         return handleUrlImpl(uri)
-    }
-
-    /** 5 quick taps on the thin progress bar toggles the injected styles (for debugging). */
-    private fun handleSecretTap() {
-        val now = System.currentTimeMillis()
-        if (now - lastTap > 3000L) taps = 0
-        lastTap = now
-        taps++
-        if (taps < 5) return
-        taps = 0
-        toggleStyles()
-    }
-
-    /** Volume-up x3 within 2s: toggle the injected styles (quick A/B test). */
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            val now = System.currentTimeMillis()
-            if (now - lastVol > 2000L) volTaps = 0
-            lastVol = now
-            volTaps++
-            if (volTaps >= 3) {
-                volTaps = 0
-                toggleStyles()
-                return true
-            }
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
-    private fun toggleStyles() {
-        val next = !stylesOn()
-        getSharedPreferences("zrq", 0).edit().putBoolean("inject", next).apply()
-        Toast.makeText(
-            this,
-            if (next) "样式注入：开（刷新中）" else "样式注入：关（刷新中）",
-            Toast.LENGTH_SHORT
-        ).show()
-        web.reload()
     }
 
     /** Exposes the APK's own version so the in-page "About" line can show it. */

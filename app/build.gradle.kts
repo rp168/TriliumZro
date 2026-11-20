@@ -11,8 +11,8 @@ android {
         applicationId = "com.triliumzro.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 64
-        versionName = "0.64"
+        versionCode = 67
+        versionName = "0.67"
 
         // Where the app points on first launch. Kept out of the public source:
         // set it in an untracked gradle.properties (`server=https://…/`) or on
